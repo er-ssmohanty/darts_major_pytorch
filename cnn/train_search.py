@@ -17,10 +17,13 @@ from torch.autograd import Variable
 from model_search import Network
 from architect import Architect
 
+from torchvision.datasets import ImageFolder
+from torch.utils.data import DataLoader, random_split
+from torchvision.transforms import transforms
 
 parser = argparse.ArgumentParser("cifar")
 parser.add_argument('--data', type=str, default='../data', help='location of the data corpus')
-parser.add_argument('--batch_size', type=int, default=64, help='batch size')
+parser.add_argument('--batch_size', type=int, default=8, help='batch size')
 parser.add_argument('--learning_rate', type=float, default=0.025, help='init learning rate')
 parser.add_argument('--learning_rate_min', type=float, default=0.001, help='min learning rate')
 parser.add_argument('--momentum', type=float, default=0.9, help='momentum')
@@ -77,28 +80,28 @@ def main():
   model = model.cuda()
   logging.info("param size = %fMB", utils.count_parameters_in_MB(model))
 
-  optimizer = torch.optim.SGD(
+  optimizer = torch.optim.Adam(
       model.parameters(),
       args.learning_rate,
-      momentum=args.momentum,
+      # momentum=args.momentum,
       weight_decay=args.weight_decay)
 
-  train_transform, valid_transform = utils._data_transforms_cifar10(args)
-  train_data = dset.CIFAR10(root=args.data, train=True, download=True, transform=train_transform)
 
-  num_train = len(train_data)
-  indices = list(range(num_train))
-  split = int(np.floor(args.train_portion * num_train))
+  data_transforms = transforms.Compose([
+    transforms.Resize(128),
+    transforms.ToTensor(),
+    transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+  ])
+  
+  dataset = ImageFolder('/notebooks/ultrasound/train', transform=data_transforms)
+  split_ratio=0.7
+  train_dataset, val_dataset = random_split(dataset, [int(split_ratio*len(dataset)), len(dataset)-int(split_ratio*len(dataset))])
+  train_loader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True)
+  val_loader = DataLoader(val_dataset, batch_size=args.batch_size, shuffle=False)
+  
+  num_classes = len(dataset.classes)
 
-  train_queue = torch.utils.data.DataLoader(
-      train_data, batch_size=args.batch_size,
-      sampler=torch.utils.data.sampler.SubsetRandomSampler(indices[:split]),
-      pin_memory=True, num_workers=2)
 
-  valid_queue = torch.utils.data.DataLoader(
-      train_data, batch_size=args.batch_size,
-      sampler=torch.utils.data.sampler.SubsetRandomSampler(indices[split:num_train]),
-      pin_memory=True, num_workers=2)
 
   scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
         optimizer, float(args.epochs), eta_min=args.learning_rate_min)
@@ -117,7 +120,7 @@ def main():
     print(F.softmax(model.alphas_reduce, dim=-1))
 
     # training
-    train_acc, train_obj = train(train_queue, valid_queue, model, architect, criterion, optimizer, lr)
+    train_acc, train_obj = train(train_loader, val_loader, model, architect, criterion, optimizer, lr)
     logging.info('train_acc %f', train_acc)
 
     # validation
@@ -127,12 +130,12 @@ def main():
     utils.save(model, os.path.join(args.save, 'weights.pt'))
 
 
-def train(train_queue, valid_queue, model, architect, criterion, optimizer, lr):
+def train(train_loader, val_loader, model, architect, criterion, optimizer, lr):
   objs = utils.AvgrageMeter()
   top1 = utils.AvgrageMeter()
   top5 = utils.AvgrageMeter()
 
-  for step, (input, target) in enumerate(train_queue):
+  for step, (input, target) in enumerate(train_loader):
     model.train()
     n = input.size(0)
 
@@ -140,7 +143,7 @@ def train(train_queue, valid_queue, model, architect, criterion, optimizer, lr):
     target = Variable(target, requires_grad=False).cuda(non_blocking=True)
 
     # get a random minibatch from the search queue with replacement
-    input_search, target_search = next(iter(valid_queue))
+    input_search, target_search = next(iter(val_loader))
     input_search = Variable(input_search, requires_grad=False).cuda()
     target_search = Variable(target_search, requires_grad=False).cuda(non_blocking=True)
 
@@ -165,13 +168,13 @@ def train(train_queue, valid_queue, model, architect, criterion, optimizer, lr):
   return top1.avg, objs.avg
 
 
-def infer(valid_queue, model, criterion):
+def infer(val_loader, model, criterion):
   objs = utils.AvgrageMeter()
   top1 = utils.AvgrageMeter()
   top5 = utils.AvgrageMeter()
   model.eval()
 
-  for step, (input, target) in enumerate(valid_queue):
+  for step, (input, target) in enumerate(val_loader):
     input = Variable(input, volatile=True).cuda()
     target = Variable(target, volatile=True).cuda(non_blocking=True)
 
